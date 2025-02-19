@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Summarizer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
+</head>
+<body>
+    <div class="container">
+        <div class="main-content">
+            <div class="pdf-section">
+                <div id="pdfViewer">
+                    <canvas id="pdfCanvas"></canvas>
+                </div>
+                <div class="pdf-controls">
+                    <button id="prevPage">Previous</button>
+                    <span id="pageInfo">Page: <span id="pageNum">1</span> / <span id="pageCount">1</span></span>
+                    <button id="nextPage">Next</button>
+                </div>
+            </div>
+            <div class="bottom-section">
+                <div class="input-box">
+                    <textarea id="userInput" placeholder="Ask Gemini about these slides..."></textarea>
+                    <button id="submitBtn">
+                        <span class="button-text">Ask Gemini</span>
+                        <span class="loading-spinner" style="display: none;">Loading...</span>
+                    </button>
+                </div>
+                <div class="response-box">
+                    <div id="responseText" class="response-text">Ask Gemini a question about the slides...</div>
+                </div>
+            </div>
+        </div>
+        <div class="right-panel">
+            <div class="summary-box">
+                <div id="slideText" class="slide-text"></div>
+            </div>
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>
