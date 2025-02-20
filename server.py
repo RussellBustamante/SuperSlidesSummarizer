@@ -4,6 +4,9 @@ import os
 from google import genai
 from dotenv import load_dotenv
 import pathlib
+import asyncio
+import threading
+from app import main as process_pdf
 
 app = Flask(__name__)
 
@@ -20,12 +23,27 @@ PDF_PATH = "03-storage1.pdf"
 def load_slide_data():
     try:
         with open('static/data/slide_texts.json', 'r') as f:
-            return json.load(f)
+            content = f.read().strip()
+            if not content:
+                # If the file is empty, return a default dictionary
+                return {
+                    "1": "Slide 1: Default Title",
+                    "2": "Slide 2: Default Title",
+                    "3": "Slide 3: Default Title",
+                }
+            return json.loads(content)
     except FileNotFoundError:
         return {
-            "1": "This is the first slide's text. It discusses database storage basics.",
-            "2": "Second slide covers memory hierarchy and its importance.",
-            "3": "Third slide explains disk-based architecture.",
+            "1": "Slide 1: Default Title",
+            "2": "Slide 2: Default Title",
+            "3": "Slide 3: Default Title",
+        }
+    except json.JSONDecodeError:
+        # If file is malformed, return a default structure.
+        return {
+            "1": "Slide 1: Default Title",
+            "2": "Slide 2: Default Title",
+            "3": "Slide 3: Default Title",
         }
 
 # Get overall context from all slides
@@ -33,7 +51,12 @@ def get_overall_context():
     slides = load_slide_data()
     context = "This is a lecture about Database Systems, specifically focusing on Database Storage (Files & Pages). "
     context += "The lecture covers: "
-    topics = [text.split(": ", 1)[1] if ": " in text else text for text in slides.values()]
+    topics = []
+    for slide_data in slides.values():
+        if isinstance(slide_data, dict):
+            topics.append(slide_data.get('title', '').split(': ', 1)[-1])
+        else:
+            topics.append(slide_data.split(': ', 1)[-1] if ': ' in slide_data else slide_data)
     context += ", ".join(topics[:10])  # First 10 topics for brevity
     context += "... and more topics related to database storage systems."
     return context
@@ -50,9 +73,40 @@ def get_slide_context(current_slide, slides):
     context_slides = {}
     for idx in range(start_idx, end_idx):
         slide_num = slide_numbers[idx]
-        context_slides[slide_num] = slides[str(slide_num)]
-    
+        slide_data = slides[str(slide_num)]
+        if isinstance(slide_data, dict):
+            context_slides[slide_num] = f"{slide_data.get('title', '')} - {slide_data.get('summary', '')}"
+        else:
+            context_slides[slide_num] = slide_data
     return context_slides
+
+def fix_json_response(text):
+    """Attempt to fix malformed JSON in Gemini's response."""
+    retry_prompt = f"""The following text was meant to be valid JSON but may be malformed. 
+    Please carefully format it as valid JSON, preserving all the information:
+
+    {text}
+
+    Return ONLY the fixed JSON with no additional text or explanation."""
+
+    try:
+        # First try parsing as-is
+        json.loads(text)
+        return text
+    except json.JSONDecodeError:
+        try:
+            # Try getting Gemini to fix it
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=retry_prompt
+            )
+            fixed_text = response.text.strip()
+            # Verify the fixed version is valid JSON
+            json.loads(fixed_text)
+            return fixed_text
+        except Exception as e:
+            print(f"Error fixing JSON: {str(e)}")
+            raise
 
 @app.route('/')
 def index():
@@ -73,50 +127,82 @@ def ask_gemini():
         question = data.get('question')
         current_slide = int(data.get('currentSlide'))
         
-        # Upload the PDF file to Gemini
-        pdf_file = client.files.upload(file=PDF_PATH)
-        
         # Get slides data
         slides = load_slide_data()
+        
+        # Get current slide content
+        current_slide_data = slides[str(current_slide)]
+        if isinstance(current_slide_data, dict):
+            current_slide_content = f"{current_slide_data.get('title', '')} - {current_slide_data.get('summary', '')}"
+        else:
+            current_slide_content = current_slide_data
         
         # Get surrounding slides for context
         context_slides = get_slide_context(current_slide, slides)
         
-        # Construct context string
-        slides_context = "\n".join([
-            f"Slide {num}: {content}"
-            for num, content in context_slides.items()
-        ])
+        # Upload the PDF file to Gemini
+        sample_file = client.files.upload(file=PDF_PATH)
         
-        # Get overall lecture context
-        lecture_context = get_overall_context()
-        
-        # Construct prompt
+        # Construct prompt with slide content and question
         prompt = f"""This is a question about slide {current_slide} of the PDF document.
 
 Question: {question}
 
-Current Slide: {current_slide}
+Current Slide Content:
+{current_slide_content}
 
 Surrounding Slides Content:
-{slides_context}
+{", ".join([f"Slide {num}: {content}" for num, content in context_slides.items()])}
 
-Overall Lecture Context: {lecture_context}
+Please focus on answering the question based on both the PDF content and the slide summaries provided.
+Format your response as valid markdown text."""
 
-Please focus on the content of slide {current_slide} when answering the question. You may also reference nearby slides if they provide relevant context.
-Only answer based on what you can see in the actual PDF document."""
-
-        # Call Gemini with both the PDF and the prompt
+        # Call Gemini with both PDF and prompt
         response = client.models.generate_content(
             model="gemini-2.0-flash",
-            contents=[pdf_file, prompt]
+            contents=[sample_file, prompt]
         )
+
+        # Get the response text
+        response_text = response.text
+
+        # If the response looks like it might be JSON, try to fix it
+        if '{' in response_text and '}' in response_text:
+            try:
+                response_text = fix_json_response(response_text)
+            except Exception as e:
+                print(f"Failed to fix JSON response: {str(e)}")
+                # Continue with original response if fixing fails
         
         return jsonify({
             'success': True,
-            'response': response.text
+            'response': response_text
         })
         
+    except Exception as e:
+        print(f"Error in ask_gemini: {str(e)}")  # Add logging
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/process_pdf', methods=['POST'])
+def trigger_processing():
+    try:
+        def run_async():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(process_pdf())
+            loop.close()
+
+        # Run the processing in a background thread
+        thread = threading.Thread(target=run_async)
+        thread.start()
+        
+        return jsonify({
+            'success': True,
+            'message': 'PDF processing started'
+        })
     except Exception as e:
         return jsonify({
             'success': False,
@@ -124,4 +210,4 @@ Only answer based on what you can see in the actual PDF document."""
         }), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, host='0.0.0.0', port=5001)
